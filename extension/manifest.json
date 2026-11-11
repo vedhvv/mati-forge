@@ -1,0 +1,47 @@
+{
+  "manifest_version": "0.3",
+  "name": "mati-forge",
+  "display_name": "Mati Forge",
+  "version": "0.2.1",
+  "description": "Stores the notes captured by the Mati Forge plugin in ~/MatiForge/forge.db on your computer. Local storage only; nothing is sent anywhere.",
+  "author": {
+    "name": "vedhvv"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/index.js"
+      ]
+    }
+  },
+  "tools": [
+    {
+      "name": "log_failure",
+      "description": "Save one short entry when you correct Claude."
+    },
+    {
+      "name": "log_subagent",
+      "description": "Save one short entry about a subagent problem."
+    },
+    {
+      "name": "update_subagent",
+      "description": "Record whether Claude recovered from a subagent problem."
+    },
+    {
+      "name": "show_notes",
+      "description": "List your recent Forge notes."
+    }
+  ],
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32"
+    ],
+    "runtimes": {
+      "node": ">=22.13.0"
+    }
+  }
+}

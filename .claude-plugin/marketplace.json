@@ -1,0 +1,13 @@
+{
+  "name": "mati-forge",
+  "owner": { "name": "vedhvv" },
+  "description": "Mati Forge: quietly notes the moments you correct Claude, stored only on your computer.",
+  "plugins": [
+    {
+      "name": "mati-forge",
+      "source": "./plugins/mati-forge",
+      "description": "Captures your corrections to Claude, and subagents that fail or are retried, as short local notes. Needs the Mati Forge desktop extension.",
+      "category": "productivity"
+    }
+  ]
+}
