@@ -1,8 +1,8 @@
 {
   "name": "mati-forge",
   "displayName": "Mati Forge",
-  "version": "0.2.1",
-  "description": "Quietly captures the moments you correct Claude, and subagents that fail or are retried, as short summaries on your computer. Needs the Mati Forge desktop extension, which stores the notes in ~/MatiForge/forge.db. Ask \"show my Forge notes\" to see them. Local storage only; nothing is sent anywhere.",
+  "version": "0.3.1",
+  "description": "Quietly captures the moments you correct Claude, and subagents that fail or are retried, as short summaries on your computer, turns the ones you approve into rules, and briefs Claude with them at the start of each task. Needs the Mati Forge desktop extension, which stores everything in ~/MatiForge. Ask \"show my Forge notes\", \"review my Forge notes\" or \"show my Forge rules\". Local storage only; nothing is sent anywhere.",
   "author": {
     "name": "vedhvv"
   }

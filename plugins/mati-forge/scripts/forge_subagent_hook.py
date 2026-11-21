@@ -22,6 +22,7 @@ Rules this script follows:
 - Python standard library only. Works on Python 3.9 (the macOS default).
 """
 
+import hashlib
 import json
 import re
 import sys
@@ -38,7 +39,7 @@ SCOPE_RULE = (
 )
 
 COMMON = (
-    'subagent_type "{type}", asked (one short sentence on what the subagent was asked '
+    'subagent_type "{type}", {ref}asked (one short sentence on what the subagent was asked '
     "to do, in your words), task_type (a short label such as pitch_deck, ic_note, memo, "
     'email, spreadsheet, research, code, or other), and scope (' + SCOPE_RULE + '). '
     "Leave out people's names, company names, email addresses, "
@@ -83,6 +84,12 @@ def clean_type(value):
     return value or "general-purpose"
 
 
+def task_ref(payload):
+    """Same short task code as forge_hook.py, so the server can link entries from one task."""
+    session = str(payload.get("session_id") or "")
+    return hashlib.sha256(session.encode("utf-8")).hexdigest()[:8] if session else ""
+
+
 def build(payload):
     """Return (hook_event_name, note) or None if nothing should be added."""
     if payload.get("agent_id"):  # running inside a subagent: main Claude only
@@ -93,17 +100,19 @@ def build(payload):
     tool_input = tool_input if isinstance(tool_input, dict) else {}
     subagent_type = clean_type(tool_input.get("subagent_type"))
     event = payload.get("hook_event_name")
+    ref = task_ref(payload)
+    ref = 'task_ref "' + ref + '", ' if ref else ""
 
     if event == "PostToolUseFailure":
         if payload.get("is_interrupt"):
             return None
-        return event, FAILED_NOTE.format(type=subagent_type)
+        return event, FAILED_NOTE.format(type=subagent_type, ref=ref)
 
     if event == "PostToolUse":
         response = payload.get("tool_response")
         if isinstance(response, dict) and response.get("status") == "async_launched":
             return None  # background subagent: no result to judge yet
-        return event, FINISHED_NOTE.format(type=subagent_type)
+        return event, FINISHED_NOTE.format(type=subagent_type, ref=ref)
 
     return None
 

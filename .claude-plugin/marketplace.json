@@ -6,7 +6,7 @@
     {
       "name": "mati-forge",
       "source": "./plugins/mati-forge",
-      "description": "Captures your corrections to Claude, and subagents that fail or are retried, as short local notes. Needs the Mati Forge desktop extension.",
+      "description": "Captures your corrections to Claude, and subagents that fail or are retried, as short local notes. Turns approved notes into rules that Claude checks at the start of similar tasks. Needs the Mati Forge desktop extension.",
       "category": "productivity"
     }
   ]

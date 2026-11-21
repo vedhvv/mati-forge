@@ -1,6 +1,6 @@
 # Mati Forge
 
-Mati Forge quietly notes the moments you correct Claude, so you can see later where it keeps getting things wrong. It also notes subagents that fail, return unfinished work, or have to be re-run.
+Mati Forge quietly notes the moments you correct Claude, so you can see later where it keeps getting things wrong. It also notes subagents that fail, return unfinished work, or have to be re-run. You can turn notes into rules, and Claude is reminded of them at the start of similar tasks.
 
 This is an early test version. Thank you for trying it.
 
@@ -50,10 +50,21 @@ In any Cowork task, ask: **show my Forge notes**
 
 You can also ask for only corrections, only subagent notes, or only one label, for example "show my personal Forge notes".
 
+## Turn notes into rules
+
+Ask: **review my Forge notes**
+
+Claude goes through your notes one at a time and suggests a short rule for each. You choose **approve**, **edit**, **reject** or **skip**. Nothing becomes a rule unless you approve it, and rejected notes are kept, marked rejected.
+
+- **show my Forge rules** lists your rules.
+- Rules are also saved as plain text files in `MatiForge/rules/`, one file per kind of task.
+- At the start of a task, Claude quietly checks your rules for that kind of task. For example, a rule may make it ask you a question before starting.
+- If Claude makes a mistake that one of your rules already covered, Forge marks it as a repeat, so you can see which rules are not working.
+
 ## Update
 
 - **Plugin:** in **Customize > Plugins**, open the `mati-forge` marketplace and choose **Check for updates**, or turn on **Sync automatically**. If you installed by upload, upload the new zip instead.
-- **Extension:** when a release says the extension changed, download the new `.mcpb` file and install it the same way. Your notes are kept.
+- **Extension:** when a release says the extension changed, download the new `.mcpb` file and install it the same way, then restart Claude. Your notes are kept, and a backup is made before any upgrade.
 
 ## Remove
 
