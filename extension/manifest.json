@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "mati-forge",
   "display_name": "Mati Forge",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Stores the notes and rules captured by the Mati Forge plugin in ~/MatiForge on your computer. Local storage only; nothing is sent anywhere.",
   "author": {
     "name": "vedhvv"
@@ -57,6 +57,10 @@
     {
       "name": "show_rules",
       "description": "List your Forge rules in use."
+    },
+    {
+      "name": "export_rules",
+      "description": "Copy your rules as text for another AI. Work rules are never included."
     },
     {
       "name": "get_report",

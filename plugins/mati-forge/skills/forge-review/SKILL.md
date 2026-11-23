@@ -1,6 +1,6 @@
 ---
 name: forge-review
-description: Review pending Mati Forge notes one at a time and turn approved ones into rules, keep, drop, reword or restore a Forge rule, or show the Forge report. Use when the user asks to "review my Forge notes", "show my Forge report", "monthly Forge report", "keep R4", "drop R7", "reword R3", or similar.
+description: Review pending Mati Forge notes one at a time and turn approved ones into rules, keep, drop, reword or restore a Forge rule, show the Forge report, or export Forge rules. Use when the user asks to "review my Forge notes", "show my Forge report", "export my Forge rules", "monthly Forge report", "keep R4", "drop R7", "reword R3", or similar.
 ---
 
 # Review Forge notes
@@ -46,6 +46,10 @@ When the user asks for their Forge report, or says yes to the weekly offer, call
 - After it, for each rule listed under "Rules that keep repeating", you may suggest one new wording. Save it with `update_rule` reword only if the user agrees.
 - If the user answers about the new rules: "keep all" means call `update_rule` keep for each rule listed under "New rules Claude drafted"; "drop R20" or "reword R20" means that rule only. No answer is fine: those rules are kept automatically on the date shown.
 - Answers about the report are decisions, not corrections. Do not call `log_failure` for them.
+
+## Export rules
+
+When the user asks to export or copy their Forge rules (for example to paste into ChatGPT, Cursor or another Claude account), call `export_rules` and show its text exactly as returned. Rules tagged work are never exported; if the user asks for them, say so, and do not copy them out another way (for example from "show my Forge rules").
 
 ## Writing the rule
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Mati Forge v0.4.1: local MCP server, as a Claude desktop extension.
+// Mati Forge v0.4.2: local MCP server, as a Claude desktop extension.
 //
 // Plain Node.js, no packages. It runs on the Claude desktop app's built-in
 // Node on Mac and Windows, so users install nothing extra.
@@ -25,6 +25,8 @@
 //   repeats can be traced to whether the rule was briefed. Once a week it also
 //   asks Claude to offer the report.
 // - get_report: the weekly or monthly report, written by the server.
+// - export_rules: the rules in use as plain text to paste into another AI, and
+//   a copy in ~/MatiForge/rules-export.md. Rules tagged work are never included.
 //
 // Rule states: provisional (drafted by Claude, used straight away), active
 // (approved in review, kept, or reworded by the user), dropped, replaced (a
@@ -46,7 +48,7 @@ const os = require("os");
 const path = require("path");
 
 const SERVER_NAME = "forge";
-const SERVER_VERSION = "0.4.1";
+const SERVER_VERSION = "0.4.2";
 const DEFAULT_PROTOCOL = "2025-06-18";
 const DB_NAME = "forge.db";
 const SCHEMA_VERSION = 9;
@@ -319,6 +321,20 @@ const TOOLS = [
       properties: {
         task_type: { type: "string", description: "Only this task type. Omit to show all." },
         scope: { type: "string", enum: SCOPES, description: "Only rules with this scope. Omit to show all." },
+      },
+    },
+  },
+  {
+    name: "export_rules",
+    description:
+      "Mati Forge. The user's rules in use as plain text they can paste into another AI assistant " +
+      "(ChatGPT, Cursor, another Claude account), also saved to a file on their computer. Rules tagged " +
+      "work are never included, whatever the user asks. Use when the user asks to export or copy their " +
+      "Forge rules." + AS_IS,
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_type: { type: "string", description: "Only this task type (and rules for any task). Omit for all." },
       },
     },
   },
@@ -1409,6 +1425,47 @@ function showRules(args) {
   });
 }
 
+function humanType(t) {
+  return t === "any" ? "Any task" : t.charAt(0).toUpperCase() + t.slice(1).replace(/_/g, " ");
+}
+
+function exportRules(args) {
+  // Hard rule: rules tagged work never leave Forge, so they are filtered here,
+  // in the query, not by Claude.
+  const taskFilter = text(args.task_type).trim() ? cleanTaskType(args.task_type) : "";
+  const { rules, held } = withDb((db) => {
+    const conds = [LIVE, "scope != 'work'"];
+    const params = [];
+    if (taskFilter) {
+      conds.push("task_type IN (?, 'any')");
+      params.push(taskFilter);
+    }
+    return {
+      rules: db.prepare("SELECT * FROM rules WHERE " + conds.join(" AND ") +
+        " ORDER BY (task_type = 'any') DESC, task_type, (failure_type = 'wrong_direction') DESC, (failure_type = 'helper_misfire') DESC, id").all(...params),
+      held: Number(db.prepare("SELECT COUNT(*) AS n FROM rules WHERE " + LIVE + " AND scope = 'work'").get().n),
+    };
+  });
+  const heldLine = held ? held + (held === 1 ? " work rule was" : " work rules were") + " left out: work rules are never exported." : "";
+  if (!rules.length) return "No Forge rules to export." + (heldLine ? " " + heldLine : "");
+  const body = ["My rules for AI assistants. Follow them when they apply to what I ask."];
+  for (const t of Array.from(new Set(rules.map((r) => r.task_type)))) {
+    body.push("", humanType(t) + ":");
+    for (const r of rules.filter((x) => x.task_type === t)) body.push("- " + r.text);
+  }
+  const textOut = body.join("\n");
+  let fileLine;
+  try {
+    fs.mkdirSync(dataDir(), { recursive: true });
+    const file = path.join(dataDir(), "rules-export.md");
+    fs.writeFileSync(file, textOut + "\n", "utf8");
+    fileLine = "Also saved to " + file + ".";
+  } catch (e) {
+    fileLine = "The file copy could not be written: " + e.message;
+  }
+  return [textOut, "", "---", rules.length + (rules.length === 1 ? " rule" : " rules") + " exported. " + fileLine + (heldLine ? " " + heldLine : "")].join("\n");
+}
+
 function writeRulesFile(taskType) {
   // Rewrites the readable copy for one task type. The database stays the master copy.
   try {
@@ -1810,6 +1867,7 @@ const HANDLERS = {
   show_rules: showRules,
   get_briefing: getBriefing,
   get_report: getReport,
+  export_rules: exportRules,
 };
 
 // ---------- MCP plumbing ----------

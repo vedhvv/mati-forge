@@ -1,7 +1,7 @@
 {
   "name": "mati-forge",
   "displayName": "Mati Forge",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Quietly notes the moments you correct Claude, and subagents that fail, as short summaries on your computer. Claude drafts a rule from each correction; new rules are provisional, used straight away, and you can keep, drop or reword them. Needs the Mati Forge desktop extension. Ask \"show my Forge report\", \"show my Forge rules\" or \"review my Forge notes\". Local storage only; nothing is sent anywhere.",
   "author": {
     "name": "vedhvv"

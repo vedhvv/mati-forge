@@ -1,8 +1,8 @@
 # Mati Forge
 
-Mati Forge quietly notes the moments you correct Claude, so you can see later where it keeps getting things wrong. It also notes subagents that fail, return unfinished work, or have to be re-run. You can turn notes into rules, and Claude is reminded of them at the start of similar tasks.
+Mati Forge quietly notes the moments you correct Claude, so you can see later where it keeps getting things wrong. It also notes subagents that fail, return unfinished work, or have to be re-run. Each correction becomes a short rule you can keep or drop, Claude is reminded of the right rules at the start of similar tasks, and a weekly report shows whether the mistakes stop coming back.
 
-This is an early test version. Thank you for trying it.
+Mati Forge is an early, free, open-source project (MIT license). Everything stays on your computer.
 
 ## What it captures
 
@@ -12,7 +12,7 @@ When one of your messages looks like a correction ("no", "instead", "can you cha
 - what you asked for instead, in Claude's own words
 - the kind of task (email, memo, research and so on)
 - whether subagents were involved
-- a label: **personal**, **work**, or **mati**. Anything work-related or unclear is labelled **work**.
+- a label: **personal**, **work**, or **mati** (about Mati Forge itself). Anything work-related or unclear is labelled **work**.
 
 Notes are short summaries, never copies of your conversation. Claude is told to leave out names, company names, contact details and figures, and Forge also removes email addresses, phone numbers and similar numbers before saving.
 
@@ -23,6 +23,7 @@ Claude does not mention Forge in its replies. You may see a small line such as "
 - Notes are stored only on your computer, in a folder called `MatiForge` in your home folder (`~/MatiForge` on Mac, `C:\Users\<you>\MatiForge` on Windows).
 - Forge makes no network calls and sends nothing to anyone, including the author.
 - Your conversations are still processed by Claude as usual. Forge keeps no copy of them.
+- Rules labelled **work** are never included when you export your rules.
 
 ## Install
 
@@ -30,15 +31,14 @@ You need the Claude desktop app, open, with Cowork. Forge has two parts, and you
 
 **1. The plugin** (notices corrections)
 
-1. Accept the GitHub invite for this repository if you haven't.
-2. In Claude, open **Customize > Plugins**, choose **Add marketplace**, and enter `vedhvv/mati-forge`.
-3. Find **Mati Forge** in the list and click **Install**.
+1. In Claude, open **Customize > Plugins**, choose **Add marketplace**, and enter `vedhvv/mati-forge`.
+2. Find **Mati Forge** in the list and click **Install**.
 
-If **Add marketplace** fails, download `mati-forge-<version>.zip` from this repository's **Releases** page instead, and use **Customize > Plugins > Upload plugin**.
+If **Add marketplace** fails, download `mati-forge-<version>.zip` from the [latest release](https://github.com/vedhvv/mati-forge/releases/latest) instead, and use **Customize > Plugins > Upload plugin**.
 
 **2. The desktop extension** (saves and shows your notes)
 
-1. Download `mati-forge-extension-<version>.mcpb` from the **Releases** page.
+1. Download `mati-forge-extension-<version>.mcpb` from the [latest release](https://github.com/vedhvv/mati-forge/releases/latest).
 2. Double-click it, or in Claude go to **Settings > Extensions > Advanced settings > Install Extension...** and choose the file.
 3. Review and click **Install**.
 
@@ -73,6 +73,18 @@ It shows:
 - new provisional rules: drop or reword any you don't want. **No answer means keep**: a rule is kept 7 days after it first appears in a report.
 - conflicts, where a newer correction replaced an older rule
 
+## Export your rules
+
+Ask: **export my Forge rules**
+
+You get your rules as plain text to paste into ChatGPT, Cursor or another Claude account, and a copy is saved as `MatiForge/rules-export.md`. Rules labelled **work** are always left out.
+
+## What it runs on your computer
+
+- **Plugin:** three small Python scripts that run when you send a message, when a task starts, and after a helper agent finishes. Each one only adds a short note for Claude (for example, asking it to save a correction). They write no files and make no network calls. In Cowork they run in Claude's own task sandbox.
+- **Desktop extension:** a small program, started by the Claude app, that reads and writes only the `MatiForge` folder in your home folder. It makes no network calls.
+- All the code is in this repository: `plugins/mati-forge/` and `extension/`.
+
 ## Update
 
 - **Plugin:** in **Customize > Plugins**, open the `mati-forge` marketplace and choose **Check for updates**, or turn on **Sync automatically**. If you installed by upload, upload the new zip instead.
@@ -88,8 +100,9 @@ It shows:
 
 - Tested only on a Mac so far. Windows has not been tried yet. Please report what happens.
 - The Claude desktop app must be open for notes to be saved.
+- The extension does not update itself. When a release says it changed, install the new `.mcpb` file.
 - Corrections made in the **Code** tab, rather than Cowork, need Python 3 on your computer. Cowork on a Mac does not; on Windows this is not known yet.
 
 ## Feedback
 
-Tell the person who invited you what worked, what didn't, and anything that felt off.
+Open an issue on this repository's [Issues page](https://github.com/vedhvv/mati-forge/issues): what worked, what didn't, and anything that felt off. Please don't paste your notes or rules there if they contain anything private.
