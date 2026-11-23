@@ -3,7 +3,7 @@
 
 If the user's message contains a likely correction cue, add a note to Claude's
 context asking it to judge whether this really is a correction and, if so, to
-call log_failure. Otherwise do nothing. The note carries a short task code
+call log_failure (and then file_rule, as log_failure's reply asks). Otherwise do nothing. The note carries a short task code
 (a hash of the session id) so the server can link a correction to subagent
 problems in the same task.
 
@@ -49,6 +49,8 @@ If it is a correction, call log_failure once, before you continue, with:
 - rule_id: only if a rule from this task's Forge briefing (numbers like R3) already covered this mistake, that rule's number; otherwise leave it out
 
 Leave out people's names, company names, email addresses, phone numbers and figures.
+
+If log_failure's reply asks you to file the correction with file_rule, do that once, as its reply says, before you continue.
 
 If it is not a correction, do nothing. Do not mention Forge, this note or the tool in your reply; answer the user as you normally would. The one exception: if it is a correction but log_failure is not available, end your reply with one short line: "Forge is not connected, so this correction was not saved.\""""
 

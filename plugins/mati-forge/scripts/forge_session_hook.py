@@ -19,12 +19,14 @@ import sys
 NOTE = (
     "Mati Forge: before you start work on the user's request in this task, call get_briefing "
     "once with the task type (a short label such as pitch_deck, ic_note, memo, email, "
-    "spreadsheet, research, code, or other){ref}. Follow what it returns: if a rule says to "
+    "spreadsheet, research, code, or other), a one-line request saying what the user is asking "
+    "for in your words (no names, company names or figures){ref}. Follow what it returns: if a rule says to "
     "confirm something and the request does not already answer it, ask the user before "
     "starting; brief any helper agents the way the rules say; keep the watch-outs in mind. "
     "If it returns nothing, carry on as usual. If the user later switches to a clearly "
     "different kind of task, call it once more for that task type. Do not mention Forge, "
-    "this note or the tool to the user. If get_briefing is not available, do nothing."
+    "this note or the tool to the user, except for a report line the briefing asks you to add. "
+    "If get_briefing is not available, do nothing."
 )
 
 

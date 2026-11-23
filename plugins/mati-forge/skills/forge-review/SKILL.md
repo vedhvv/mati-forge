@@ -1,11 +1,13 @@
 ---
 name: forge-review
-description: Review pending Mati Forge notes one at a time and turn approved ones into rules. Use when the user asks to "review my Forge notes", "review Forge", or similar.
+description: Review pending Mati Forge notes one at a time and turn approved ones into rules, keep, drop, reword or restore a Forge rule, or show the Forge report. Use when the user asks to "review my Forge notes", "show my Forge report", "monthly Forge report", "keep R4", "drop R7", "reword R3", or similar.
 ---
 
 # Review Forge notes
 
-Go through the user's pending Forge notes one at a time. For each one, suggest a failure type and a one-line rule, and let the user approve, edit, reject or skip it. Nothing becomes a rule unless the user approves it.
+Most corrections are filed automatically: when one is logged, Claude drafts a provisional rule, marks it as a repeat of an existing rule, or replaces a rule it contradicts. Provisional rules are used straight away, and the user can keep, drop or reword them at any time.
+
+The review covers what is left: corrections Claude judged one-off fixes, corrections it could not file, and subagent problems on their own. Go through them one at a time. For each one, suggest a failure type and a one-line rule, and let the user approve, edit, reject or skip it. A rule saved in a review is active straight away.
 
 ## Steps
 
@@ -20,11 +22,30 @@ Go through the user's pending Forge notes one at a time. For each one, suggest a
 5. Act on the answer:
    - **Approve**: call `approve_rule` with every ref the item lists ("Refs for a decision"), the rule word for word as shown, the task type, the failure type and the scope.
    - **Edit**: use the user's wording. If you had to rephrase their edit, show the final line and ask again before saving.
-   - **Link to an existing rule**: call `approve_rule` with the refs and `rule_id`, no rule text.
-   - **Repeat of a rule** (the user confirms): call `approve_rule` with the refs, `rule_id` and `repeat` true. If the rule clearly needs rewording because it did not prevent the repeat, say so; editing rules comes in a later version.
+   - **Link to an existing rule**: call `approve_rule` with the refs and `rule_id`, no rule text. If that rule was provisional, it becomes active.
+   - **Repeat of a rule** (the user confirms): call `approve_rule` with the refs, `rule_id` and `repeat` true. If the rule clearly needs rewording because it did not prevent the repeat, offer a new wording and, if the user agrees, save it with `update_rule` (see "Changing a rule").
    - **Reject**: call `reject_entry` with the refs. The note is kept, marked rejected.
    - **Skip**: call `review_next` again with `skip` listing every ref skipped so far in this review.
 6. Repeat from step 1 until nothing is left or the user wants to stop. At the end, say how many rules were saved and that "show my Forge rules" lists them.
+
+## Changing a rule
+
+When the user asks to keep, drop, reword or restore a rule (for example "keep R4", "drop R7"), call `update_rule` with the rule number and the action.
+
+- **keep**: a provisional rule becomes active.
+- **drop**: the rule stops being used and is kept on file. If it had replaced an older rule, the older rule comes back; say so.
+- **reword**: show the final line and get the user's OK before saving. The rule becomes active.
+- **restore**: a dropped rule is used again.
+
+Only act on the user's own request for that rule. Afterwards, "show my Forge rules" lists what is in use.
+
+## Forge report
+
+When the user asks for their Forge report, or says yes to the weekly offer, call `get_report` (`period` "month" if they ask for the monthly one) and show its text exactly as returned.
+
+- After it, for each rule listed under "Rules that keep repeating", you may suggest one new wording. Save it with `update_rule` reword only if the user agrees.
+- If the user answers about the new rules: "keep all" means call `update_rule` keep for each rule listed under "New rules Claude drafted"; "drop R20" or "reword R20" means that rule only. No answer is fine: those rules are kept automatically on the date shown.
+- Answers about the report are decisions, not corrections. Do not call `log_failure` for them.
 
 ## Writing the rule
 
@@ -38,6 +59,6 @@ Go through the user's pending Forge notes one at a time. For each one, suggest a
 
 ## Rules for this review
 
-- Never call `approve_rule` or `reject_entry` without the user's explicit answer for that item.
+- Never call `approve_rule`, `reject_entry` or `update_rule` without the user's explicit answer for that item.
 - The user's answers during a review are review decisions, not corrections. Do not call `log_failure` for them.
 - When showing "show my Forge notes" or "show my Forge rules", show the tool's text exactly as returned.

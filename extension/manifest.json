@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "mati-forge",
   "display_name": "Mati Forge",
-  "version": "0.3.2",
+  "version": "0.4.1",
   "description": "Stores the notes and rules captured by the Mati Forge plugin in ~/MatiForge on your computer. Local storage only; nothing is sent anywhere.",
   "author": {
     "name": "vedhvv"
@@ -23,6 +23,14 @@
       "description": "Save one short entry when you correct Claude."
     },
     {
+      "name": "file_rule",
+      "description": "File a correction as a repeat, a new provisional rule, or a rule that replaces one it contradicts."
+    },
+    {
+      "name": "update_rule",
+      "description": "Keep, drop, reword or restore a rule."
+    },
+    {
       "name": "log_subagent",
       "description": "Save one short entry about a subagent problem."
     },
@@ -40,7 +48,7 @@
     },
     {
       "name": "approve_rule",
-      "description": "Save a rule you approved."
+      "description": "Save a rule you approved in a review."
     },
     {
       "name": "reject_entry",
@@ -48,7 +56,11 @@
     },
     {
       "name": "show_rules",
-      "description": "List your approved Forge rules."
+      "description": "List your Forge rules in use."
+    },
+    {
+      "name": "get_report",
+      "description": "Your weekly or monthly Forge report."
     },
     {
       "name": "get_briefing",

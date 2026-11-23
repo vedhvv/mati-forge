@@ -50,16 +50,28 @@ In any Cowork task, ask: **show my Forge notes**
 
 You can also ask for only corrections, only subagent notes, or only one label, for example "show my personal Forge notes".
 
-## Turn notes into rules
+## Rules
 
-Ask: **review my Forge notes**
+When you correct Claude, it also drafts a one-line rule straight away, while the details are fresh. A new rule is **provisional**: Claude uses it from the next task on, and you decide later whether to keep it.
 
-Claude goes through your notes one at a time and suggests a short rule for each. You choose **approve**, **edit**, **reject** or **skip**. Nothing becomes a rule unless you approve it, and rejected notes are kept, marked rejected.
-
-- **show my Forge rules** lists your rules.
+- If one of your rules already covered the mistake, Forge marks it as a **repeat** instead of making a new rule, so you can see which rules are not working.
+- If the correction contradicts an older rule, the newer one wins and the older rule is set aside (not deleted).
+- At the start of a task, Claude quietly checks the rules that matter most for what you asked. For example, a rule may make it ask you a question before starting.
+- **show my Forge rules** lists your rules. Say **keep R4**, **drop R4**, **reword R4** or **restore R4** to change one. Dropping a rule that replaced an older one brings the older one back.
 - Rules are also saved as plain text files in `MatiForge/rules/`, one file per kind of task.
-- At the start of a task, Claude quietly checks your rules for that kind of task. For example, a rule may make it ask you a question before starting.
-- If Claude makes a mistake that one of your rules already covered, Forge marks it as a repeat, so you can see which rules are not working.
+- **review my Forge notes** goes through the notes Claude did not turn into a rule (one-off fixes, for example) one at a time, so you can approve, edit, reject or skip each.
+
+## Weekly report
+
+Once a week, Claude offers your report at the end of a reply. You can also ask any time: **show my Forge report**, or **show my monthly Forge report**.
+
+It shows:
+
+- whether mistakes that have a rule happen less often since the rule (once there is enough data)
+- your most common kinds of mistake, compared with the week before
+- repeats after a rule, and rules that keep repeating, so you can reword them
+- new provisional rules: drop or reword any you don't want. **No answer means keep**: a rule is kept 7 days after it first appears in a report.
+- conflicts, where a newer correction replaced an older rule
 
 ## Update
 

@@ -1,22 +1,36 @@
 #!/usr/bin/env node
-// Mati Forge v0.3.2: local MCP server, as a Claude desktop extension.
+// Mati Forge v0.4.1: local MCP server, as a Claude desktop extension.
 //
 // Plain Node.js, no packages. It runs on the Claude desktop app's built-in
 // Node on Mac and Windows, so users install nothing extra.
 //
 // Stores everything in ~/MatiForge/forge.db (SQLite, via node:sqlite), plus a
-// readable copy of approved rules in ~/MatiForge/rules/<task_type>.md. On
+// readable copy of the rules in use in ~/MatiForge/rules/<task_type>.md. On
 // Windows the folder is C:\Users\<name>\MatiForge. Tools:
 // - log_failure: saves one short-summary entry about a correction. If the same
-//   task already has a subagent entry, links it as the likely cause.
+//   task already has a subagent entry, links it as the likely cause. Its reply
+//   lists the existing rules and asks Claude to file the correction.
+// - file_rule: files a just-logged correction as a repeat of an existing rule,
+//   a provisional rule that replaces a rule it contradicts, a new provisional
+//   rule, or none (left for manual review).
+// - update_rule: keep, drop, reword or restore a rule, when the user asks.
 // - log_subagent / update_subagent: one entry per subagent problem, and whether
 //   Claude recovered from it.
 // - show_notes: lists recent entries; status "test" entries are hidden unless asked.
 // - review_next / approve_rule / reject_entry: go through pending entries one
-//   at a time; a rule is saved only when the user approves it.
-// - show_rules: lists approved rules.
-// - get_briefing: at the start of a task, up to 5 rules for that task type plus
-//   up to 2 recent watch-outs; each briefing is logged so repeats can be traced.
+//   at a time; rules saved here are active straight away.
+// - show_rules: lists the rules in use (active and provisional).
+// - get_briefing: at the start of a task, the 5 most relevant rules for that
+//   task type plus up to 2 recent watch-outs; each briefing is logged so
+//   repeats can be traced to whether the rule was briefed. Once a week it also
+//   asks Claude to offer the report.
+// - get_report: the weekly or monthly report, written by the server.
+//
+// Rule states: provisional (drafted by Claude, used straight away), active
+// (approved in review, kept, or reworded by the user), dropped, replaced (a
+// newer correction contradicted it). Nothing is deleted. A provisional rule
+// becomes active by itself 7 days after it first appears in a report the user
+// opened, unless the user drops or rewords it.
 //
 // Rules this script follows:
 // - No network calls. Local files only.
@@ -32,12 +46,23 @@ const os = require("os");
 const path = require("path");
 
 const SERVER_NAME = "forge";
-const SERVER_VERSION = "0.3.2";
+const SERVER_VERSION = "0.4.1";
 const DEFAULT_PROTOCOL = "2025-06-18";
 const DB_NAME = "forge.db";
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 9;
 const MAX_TEXT = 200;
 const MAX_RULE = 300;
+const MAX_AUTO_RULE = 200; // drafted rules longer than this are sent back to be shortened
+const MAX_REQUEST = 200;
+const MAX_CANDIDATES = 20;
+const FILE_WINDOW_HOURS = 24; // file_rule only files corrections logged this recently
+const NEAR_COPY = 0.8; // word overlap above which a drafted rule counts as a copy of an existing one
+const PERIODS = { week: 7, month: 30 };
+const KEEP_AFTER_DAYS = 7; // provisional rules shown in a report are kept after this long
+const OFFER_EVERY_DAYS = 7; // the briefing offers the report at most this often
+const MIN_TASKS = 5; // briefed tasks needed on each side of a rule to measure it
+const REPEATING = 2; // repeats in 30 days that flag a rule for rewording
+const DAY_MS = 24 * 3600 * 1000;
 const MAX_TASK_TYPE = 40;
 const MAX_SUBAGENT_TYPE = 60;
 const MAX_REASON = 100;
@@ -46,6 +71,9 @@ const SUBAGENT_EVENTS = ["subagent_failed", "subagent_finished"];
 const OUTCOMES = ["error", "incomplete", "retry"];
 const RECOVERED = ["yes", "no", "unclear"];
 const KINDS = ["all", "corrections", "subagents"];
+const FILE_ACTIONS = ["repeat", "contradicts", "new", "none"];
+const RULE_ACTIONS = ["keep", "drop", "reword", "restore"];
+const LIVE = "status IN ('active', 'provisional')"; // rules in use
 const DEFAULT_SHOW = 10;
 const MAX_SHOW = 50;
 const MAX_BRIEF_RULES = 5;
@@ -102,7 +130,8 @@ const TOOLS = [
       "work. Use only when the Mati Forge note asks for it and you judge the " +
       "message is really a correction. Short summaries only, never quotes of " +
       "the conversation. Leave out names, company names, contact details and " +
-      "figures. Do not mention this tool in your reply.",
+      "figures. Do not mention this tool in your reply. Its reply may ask you to " +
+      "call file_rule next: do that once, before you continue.",
     inputSchema: {
       type: "object",
       properties: {
@@ -119,6 +148,50 @@ const TOOLS = [
         },
       },
       required: ["ai_did", "user_said", "task_type", "subagents_used", "scope"],
+    },
+  },
+  {
+    name: "file_rule",
+    description:
+      "Mati Forge. File a correction you just saved with log_failure, once, when its reply " +
+      "asks for it. Choose one action: repeat (an existing rule already covered this mistake), " +
+      "contradicts (the correction reverses an existing rule; the newer one wins), new (draft a " +
+      "one-line rule), or none (a one-off fix not worth a rule). New and replacing rules start " +
+      "provisional and are used straight away; the user can keep or drop them later. Do not " +
+      "mention this tool in your reply.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        entry: { type: "string", description: "The correction number log_failure gave you, e.g. #31." },
+        action: { type: "string", enum: FILE_ACTIONS, description: "repeat, contradicts, new or none." },
+        rule_id: { type: "string", description: "For repeat and contradicts: the existing rule, e.g. R3, from the list log_failure gave you." },
+        rule: {
+          type: "string",
+          description: "For new and contradicts: one line, at most " + MAX_AUTO_RULE + " characters, an " +
+            "instruction to Claude for this task type. wrong_direction: what to confirm before starting. " +
+            "helper_misfire: how to brief or check helper agents. No names, company names or figures.",
+        },
+        task_type: { type: "string", description: "Optional. Defaults to the correction's task type. Use any only for a rule that truly applies to every task." },
+        failure_type: { type: "string", enum: FAILURE_NAMES, description: "Optional. Defaults to the correction's failure type." },
+      },
+      required: ["entry", "action"],
+    },
+  },
+  {
+    name: "update_rule",
+    description:
+      "Mati Forge. Change a rule when the user asks: keep (a provisional rule becomes active), " +
+      "drop (stops using it; if it replaced an older rule, the older rule comes back), reword " +
+      "(new text, word for word as the user agreed; the rule becomes active), or restore (a " +
+      "dropped rule is used again). Call only on the user's explicit request in this conversation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        rule_id: { type: "string", description: "The rule, e.g. R3." },
+        action: { type: "string", enum: RULE_ACTIONS, description: "keep, drop, reword or restore." },
+        rule: { type: "string", description: "For reword: the new one-line text, as the user agreed it." },
+      },
+      required: ["rule_id", "action"],
     },
   },
   {
@@ -197,10 +270,11 @@ const TOOLS = [
   {
     name: "approve_rule",
     description:
-      "Mati Forge. Save a rule the user has just approved, word for word as they approved " +
-      "or edited it, and mark its source entries approved. Call only after the user " +
-      "explicitly approves in this conversation. To link entries to an existing rule " +
-      "instead of creating a near-copy, pass rule_id and no rule text.",
+      "Mati Forge. Save a rule the user has just approved in a review, word for word as they " +
+      "approved or edited it, and mark its source entries approved. The rule is active straight " +
+      "away. Call only after the user explicitly approves in this conversation. To link entries " +
+      "to an existing rule instead of creating a near-copy, pass rule_id and no rule text; a " +
+      "provisional rule linked this way becomes active.",
     inputSchema: {
       type: "object",
       properties: {
@@ -238,13 +312,29 @@ const TOOLS = [
   {
     name: "show_rules",
     description:
-      "Mati Forge. List the user's approved Forge rules, grouped by task type. Use when " +
-      "the user asks to see their Forge rules." + AS_IS,
+      "Mati Forge. List the user's Forge rules in use (active and provisional), grouped by " +
+      "task type. Use when the user asks to see their Forge rules." + AS_IS,
     inputSchema: {
       type: "object",
       properties: {
         task_type: { type: "string", description: "Only this task type. Omit to show all." },
         scope: { type: "string", enum: SCOPES, description: "Only rules with this scope. Omit to show all." },
+      },
+    },
+  },
+  {
+    name: "get_report",
+    description:
+      "Mati Forge. The user's Forge report for the last 7 days (week) or 30 days (month): repeat rate " +
+      "before and after rules, mistakes by type, repeats after a rule, new rules Claude drafted (keep or " +
+      "drop; no answer means keep), conflicts, and rules that keep repeating. Use when the user asks for " +
+      "their Forge report, or says yes to the weekly report offer. Show the result to the user exactly as " +
+      "returned, word for word: do not summarise, rephrase, reorder or turn it into a table. After it, you " +
+      "may suggest one new wording for each rule it flags as repeating; change a rule only when the user asks.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        period: { type: "string", enum: Object.keys(PERIODS), description: "week (default) or month." },
       },
     },
   },
@@ -259,6 +349,10 @@ const TOOLS = [
       type: "object",
       properties: {
         task_type: { type: "string", description: TASK_TYPE_HELP },
+        request: {
+          type: "string",
+          description: "One line: what the user is asking for, in your words, with no names, company names or figures. Used to pick the most relevant rules.",
+        },
         task_ref: { type: "string", description: TASK_REF_HELP },
       },
       required: ["task_type"],
@@ -340,10 +434,19 @@ const TABLES = {
       task_type TEXT NOT NULL,
       rule_ids TEXT NOT NULL DEFAULT ''
     )`,
+  // v0.4.1 (schema 9): small key-value store, e.g. when the report was last shown or offered.
+  settings: `
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    )`,
 };
 
-// Columns added to older tables. root_cause_id and repeat_of_rule_id are kept
-// empty for now; later versions use them for shared root causes and repeats.
+// Columns added to older tables. root_cause_id is kept empty for now; a later
+// version uses it for shared root causes.
+// v0.4.0 (schema 8): rules get origin (review or auto), replaces_rule_id,
+// kept_at and dropped_at; entries get filed_as (how Claude filed them);
+// briefings get the one-line request used to rank rules.
 const ADDED_COLUMNS = {
   entries: {
     failure_type: "TEXT",
@@ -351,6 +454,20 @@ const ADDED_COLUMNS = {
     reviewed_at: "TEXT",
     repeat_of_rule_id: "INTEGER",
     root_cause_id: "INTEGER",
+    filed_as: "TEXT",
+  },
+  rules: {
+    origin: "TEXT NOT NULL DEFAULT 'review'",
+    replaces_rule_id: "INTEGER",
+    kept_at: "TEXT",
+    dropped_at: "TEXT",
+    // v0.4.1 (schema 9): when a provisional rule was first in a report, and
+    // whether it was kept by the user or automatically.
+    first_reported_at: "TEXT",
+    kept_how: "TEXT",
+  },
+  briefings: {
+    request: "TEXT",
   },
   subagent_entries: {
     failure_type: "TEXT NOT NULL DEFAULT 'helper_misfire'",
@@ -358,6 +475,7 @@ const ADDED_COLUMNS = {
     reviewed_at: "TEXT",
     repeat_of_rule_id: "INTEGER",
     root_cause_id: "INTEGER",
+    filed_as: "TEXT",
   },
 };
 
@@ -410,7 +528,7 @@ function connect() {
         db.exec("ALTER TABLE subagent_entries ADD COLUMN " + column + " TEXT NOT NULL DEFAULT 'unclear'");
       }
     }
-    // Added in v0.3.0 (schema 6).
+    // Added in v0.3.0 (schema 6) and v0.4.0 (schema 8).
     for (const [table, added] of Object.entries(ADDED_COLUMNS)) {
       const now = columns(db, table);
       for (const [column, type] of Object.entries(added)) {
@@ -525,8 +643,15 @@ function parseRuleId(value) {
 }
 
 function now() {
+  return stampOf(new Date());
+}
+
+function daysAgo(n) {
+  return stampOf(new Date(Date.now() - n * DAY_MS));
+}
+
+function stampOf(d) {
   // Local time with offset, e.g. 2026-11-11T14:03:01+05:30.
-  const d = new Date();
   const pad = (n) => String(n).padStart(2, "0");
   const off = -d.getTimezoneOffset();
   const sign = off >= 0 ? "+" : "-";
@@ -556,7 +681,8 @@ function logFailure(args) {
   if (!aiDid || !userSaid) throw new Error("ai_did and user_said are both required");
   const failureType = cleanChoice(args.failure_type, FAILURE_NAMES, null);
   const taskRef = cleanTaskRef(args.task_ref);
-  withDb((db) =>
+  const taskType = cleanTaskType(args.task_type);
+  return withDb((db) =>
     inTransaction(db, () => {
       const stamp = now();
       // A rule Claude says it was briefed with and that already covered this: a repeat after that rule.
@@ -564,34 +690,60 @@ function logFailure(args) {
       try {
         if (text(args.rule_id).trim()) {
           const rid = parseRuleId(args.rule_id);
-          if (db.prepare("SELECT id FROM rules WHERE id = ? AND status = 'active'").get(rid)) repeatOf = rid;
+          if (db.prepare("SELECT id FROM rules WHERE id = ? AND " + LIVE).get(rid)) repeatOf = rid;
         }
       } catch (e) {
         repeatOf = null; // a malformed rule number is ignored, the correction is still saved
       }
       const id = Number(
         db.prepare(
-          "INSERT INTO entries (created_at, scope, task_type, ai_did, user_said, subagents_used, failure_type, task_ref, repeat_of_rule_id)" +
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        ).run(stamp, cleanScope(args.scope), cleanTaskType(args.task_type), aiDid, userSaid,
-          cleanBool(args.subagents_used) ? 1 : 0, failureType, taskRef, repeatOf).lastInsertRowid
+          "INSERT INTO entries (created_at, scope, task_type, ai_did, user_said, subagents_used, failure_type, task_ref," +
+            " repeat_of_rule_id, status, filed_as) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ).run(stamp, cleanScope(args.scope), taskType, aiDid, userSaid, cleanBool(args.subagents_used) ? 1 : 0,
+          failureType, taskRef, repeatOf, repeatOf ? "filed" : "pending", repeatOf ? "repeat" : null).lastInsertRowid
       );
       if (repeatOf) {
         db.prepare(
           "INSERT OR IGNORE INTO rule_sources (rule_id, entry_kind, entry_id, role, created_at) VALUES (?, 'correction', ?, 'repeat', ?)"
         ).run(repeatOf, id, stamp);
       }
+      let causes = [];
       if (taskRef) {
         // Any subagent problem earlier in the same task is a likely cause of this correction.
-        const subs = db.prepare("SELECT id FROM subagent_entries WHERE task_ref = ? AND status != 'test'").all(taskRef);
+        causes = db.prepare("SELECT * FROM subagent_entries WHERE task_ref = ? AND status != 'test' ORDER BY id").all(taskRef);
         const link = db.prepare(
           "INSERT OR IGNORE INTO entry_links (correction_id, subagent_id, relation, created_at) VALUES (?, ?, 'likely_cause', ?)"
         );
-        for (const s of subs) link.run(id, s.id, stamp);
+        for (const s of causes) link.run(id, s.id, stamp);
       }
+      if (repeatOf) return "Saved as #" + id + ", marked as a repeat after rule R" + repeatOf + ". Nothing else to file.";
+      return fileRequest(db, id, taskType, causes);
     })
   );
-  return "Saved";
+}
+
+function fileRequest(db, id, taskType, causes) {
+  // The reply to log_failure: the rules Claude can file this correction against, and how.
+  const candidates = candidateRules(db, taskType, null);
+  const lines = ["Saved as #" + id + ". Now call file_rule once for #" + id + ", before you continue, without mentioning it to the user."];
+  lines.push(candidates.length
+    ? "Existing rules for " + taskType + " and any task:"
+    : "There are no rules for " + taskType + " yet, so the choice is new or none.");
+  for (const r of candidates) {
+    lines.push("- R" + r.id + " (" + r.task_type + ", " + r.failure_type + (r.status === "provisional" ? ", provisional" : "") + "): " + r.text);
+  }
+  for (const s of causes) lines.push("Likely cause, same task: " + subagentSummary(s));
+  lines.push(
+    "Choose one action:",
+    "- repeat: one of the rules above already covered this mistake. Pass its rule_id.",
+    "- contradicts: the correction reverses one of the rules above. Pass its rule_id and the new rule; the newer one replaces it.",
+    "- new: none of the rules covers it. Draft one line, at most " + MAX_AUTO_RULE + " characters, as an instruction " +
+      "to Claude for " + taskType + " tasks. For wrong_direction say what to confirm before starting; for " +
+      "helper_misfire (or a likely-cause helper above) say how to brief or check helper agents; otherwise say what to " +
+      "do or avoid next time. Specific, not general advice. No names, company names or figures.",
+    "- none: a one-off fix (a single fact, typo or file) that would not help a future task."
+  );
+  return lines.join("\n");
 }
 
 function logSubagent(args) {
@@ -691,9 +843,18 @@ function correctionLines({ total, rows }, links, ruleMap) {
     if (causes) lines.push("  Likely cause: " + causes.map((s) => "#S" + s).join(", "));
     const rules = ruleMap.get("correction:" + r.id);
     if (rules) lines.push("  Rule: " + rules.join(", "));
-    if (r.repeat_of_rule_id) lines.push("  Repeated after rule: R" + r.repeat_of_rule_id);
+    if (r.repeat_of_rule_id) lines.push("  Repeated after rule: R" + r.repeat_of_rule_id + " (" + r.context + ")");
   }
   return lines;
+}
+
+function repeatContext(db, row, ruleId) {
+  // Whether the repeated rule was in this task's briefing: if it was, the rule did not
+  // work; if it existed but was left out, the briefing's ranking missed it.
+  const given = row.task_ref ? db.prepare("SELECT rule_ids FROM briefings WHERE task_ref = ?").all(row.task_ref) : [];
+  if (!given.length) return "no briefing in this task";
+  const briefed = given.some((b) => String(b.rule_ids).split(",").includes(String(ruleId)));
+  return briefed ? "it was in this task's briefing" : "it was not in this task's briefing";
 }
 
 function subagentLines({ total, rows }, links, ruleMap) {
@@ -715,6 +876,11 @@ function subagentLines({ total, rows }, links, ruleMap) {
   return lines;
 }
 
+function withContext(db, data) {
+  for (const r of data.rows) if (r.repeat_of_rule_id) r.context = repeatContext(db, r, r.repeat_of_rule_id);
+  return data;
+}
+
 function showNotes(args) {
   const limit = cleanLimit(args.limit);
   const scope = text(args.scope).trim().toLowerCase();
@@ -722,9 +888,9 @@ function showNotes(args) {
   const includeTest = cleanBool(args.include_test);
 
   const data = withDb((db) => ({
-    corrections: fetch(db, "entries",
-      "id, created_at, scope, task_type, ai_did, user_said, subagents_used, status, failure_type, repeat_of_rule_id",
-      scope, limit, includeTest),
+    corrections: withContext(db, fetch(db, "entries",
+      "id, created_at, scope, task_type, ai_did, user_said, subagents_used, status, failure_type, repeat_of_rule_id, task_ref",
+      scope, limit, includeTest)),
     subagents: fetch(db, "subagent_entries",
       "id, created_at, scope, task_type, event, subagent_type, asked, outcome, reason, recovered, status, repeat_of_rule_id",
       scope, limit, includeTest),
@@ -837,7 +1003,8 @@ function reviewNext(args) {
     }
     const ftype = item.kind === "subagent" ? "helper_misfire" : r.failure_type;
     if (r.repeat_of_rule_id) {
-      lines.push("Repeated after rule R" + r.repeat_of_rule_id + " (Claude marked this when saving). If the user agrees, " +
+      lines.push("Repeated after rule R" + r.repeat_of_rule_id + " (Claude marked this when saving; " +
+        repeatContext(db, r, r.repeat_of_rule_id) + "). If the user agrees, " +
         "link it with approve_rule rule_id R" + r.repeat_of_rule_id + " and repeat true.");
     } else if (ftype) {
       const possible = possibleRepeats(db, r, ftype);
@@ -847,11 +1014,15 @@ function reviewNext(args) {
       }
     }
     const sameType = db.prepare(
-      "SELECT id, text, failure_type FROM rules WHERE status = 'active' AND task_type IN (?, 'any') ORDER BY id"
+      "SELECT id, text, failure_type, status FROM rules WHERE " + LIVE + " AND task_type IN (?, 'any') ORDER BY id"
     ).all(r.task_type);
     lines.push(sameType.length
-      ? "Existing rules for " + r.task_type + ": " + sameType.map((x) => "R" + x.id + " (" + x.failure_type + "): " + x.text).join(" | ")
+      ? "Existing rules for " + r.task_type + ": " + sameType.map((x) =>
+        "R" + x.id + " (" + x.failure_type + (x.status === "provisional" ? ", provisional" : "") + "): " + x.text).join(" | ")
       : "Existing rules for " + r.task_type + ": none.");
+    if (item.kind === "correction" && r.filed_as === "none") {
+      lines.push("When this was logged, Claude judged it a one-off fix not worth a rule. The user may still make one.");
+    }
     const types = new Set();
     for (const t of db.prepare("SELECT DISTINCT task_type FROM entries UNION SELECT DISTINCT task_type FROM subagent_entries UNION SELECT DISTINCT task_type FROM rules").all()) {
       types.add(t.task_type);
@@ -870,14 +1041,14 @@ function possibleRepeats(db, row, failureType) {
     for (const b of db.prepare("SELECT rule_ids FROM briefings WHERE task_ref = ?").all(row.task_ref)) {
       for (const x of String(b.rule_ids).split(",").filter(Boolean)) {
         const rule = db.prepare(
-          "SELECT id FROM rules WHERE id = ? AND status = 'active' AND failure_type = ? AND created_at <= ?"
+          "SELECT id FROM rules WHERE id = ? AND " + LIVE + " AND failure_type = ? AND created_at <= ?"
         ).get(Number(x), failureType, row.created_at);
         if (rule) ids.add(rule.id);
       }
     }
   }
   for (const rule of db.prepare(
-    "SELECT id FROM rules WHERE status = 'active' AND failure_type = ? AND task_type IN (?, 'any') AND created_at <= ? ORDER BY id"
+    "SELECT id FROM rules WHERE " + LIVE + " AND failure_type = ? AND task_type IN (?, 'any') AND created_at <= ? ORDER BY id"
   ).all(failureType, row.task_type, row.created_at)) {
     ids.add(rule.id);
   }
@@ -912,9 +1083,12 @@ function approveRule(args) {
       const stamp = now();
       if (text(args.rule_id).trim()) {
         const id = parseRuleId(args.rule_id);
-        ruleRow = db.prepare("SELECT * FROM rules WHERE id = ? AND status = 'active'").get(id);
-        if (!ruleRow) throw new Error("no active rule R" + id);
-        db.prepare("UPDATE rules SET updated_at = ? WHERE id = ?").run(stamp, id);
+        ruleRow = db.prepare("SELECT * FROM rules WHERE id = ? AND " + LIVE).get(id);
+        if (!ruleRow) throw new Error("no rule R" + id + " in use");
+        // Approving in a review counts as keeping a provisional rule.
+        db.prepare("UPDATE rules SET updated_at = ?, status = 'active', kept_how = CASE WHEN status = 'provisional' THEN 'user' ELSE kept_how END," +
+          " kept_at = CASE WHEN status = 'provisional' THEN ? ELSE kept_at END WHERE id = ?")
+          .run(stamp, stamp, id);
       } else {
         const ruleText = scrub(args.rule, MAX_RULE);
         if (!ruleText) throw new Error("rule is required (or pass rule_id to link to an existing rule)");
@@ -962,6 +1136,208 @@ function rejectEntry(args) {
   return "Marked rejected: " + refs.map((x) => refName(parseRef(x).kind, parseRef(x).id)).join(", ") + ". Kept, no rule made.";
 }
 
+// ---------- rules drafted at capture ----------
+
+// Common words that say nothing about what a rule is for. Used by the
+// near-copy check and by briefing relevance.
+const STOPWORDS = new Set((
+  "the and for with that this these those from into onto about above below before after when what which who whom " +
+  "whose why how where your yours you are was were will would should could can cannot not any all each every " +
+  "use using used make made making write writing draft please help need needs want wants also just only than then " +
+  "them they their there here have has had does did doing done been being its it's our ours out over under more most " +
+  "some such very via per one two own same other others claude user task tasks thing things"
+).split(" "));
+
+function terms(value) {
+  // Distinct meaningful words, lower case, with a plain trailing "s" removed.
+  const out = new Set();
+  for (const raw of text(value).toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+    if (raw.length < 3 || STOPWORDS.has(raw)) continue;
+    out.add(raw.length > 3 && raw.endsWith("s") && !raw.endsWith("ss") ? raw.slice(0, -1) : raw);
+  }
+  return out;
+}
+
+function overlap(a, b) {
+  // Share of distinct words two texts have in common (0 to 1).
+  const x = terms(a);
+  const y = terms(b);
+  if (!x.size || !y.size) return 0;
+  let both = 0;
+  for (const t of x) if (y.has(t)) both += 1;
+  return both / (x.size + y.size - both);
+}
+
+function ageHours(stamp) {
+  const t = Date.parse(stamp);
+  return Number.isFinite(t) ? (Date.now() - t) / 3600000 : Infinity;
+}
+
+function candidateRules(db, taskType, limit) {
+  // Rules in use for this task type and for any task: task-specific first, newest first.
+  const rows = db.prepare(
+    "SELECT * FROM rules WHERE " + LIVE + " AND task_type IN (?, 'any') ORDER BY (task_type = 'any'), id DESC"
+  ).all(taskType);
+  return rows.slice(0, limit || MAX_CANDIDATES);
+}
+
+function restoredStatus(rule) {
+  // A rule the user approved or kept comes back active; one Claude drafted comes back provisional.
+  return rule.origin === "review" || rule.kept_at ? "active" : "provisional";
+}
+
+function draftedText(value, candidates) {
+  // Checks a rule Claude drafted. Errors say what to fix so Claude can call again.
+  const raw = text(value).split(/\s+/u).filter(Boolean).join(" ");
+  if (!raw) throw new Error("rule is required for this action: one line, an instruction to Claude");
+  if (Array.from(raw).length > MAX_AUTO_RULE) {
+    throw new Error("the rule is " + Array.from(raw).length + " characters; shorten it to at most " + MAX_AUTO_RULE +
+      " and call file_rule again");
+  }
+  const ruleText = scrub(raw, MAX_AUTO_RULE);
+  for (const r of candidates) {
+    if (overlap(ruleText, r.text) >= NEAR_COPY) {
+      throw new Error("this says almost the same as R" + r.id + " (" + r.text + "). If R" + r.id +
+        " already covered the mistake, use action repeat with rule_id R" + r.id + "; otherwise make the new rule clearly different");
+    }
+  }
+  return ruleText;
+}
+
+function fileRule(args) {
+  const p = parseRef(args.entry);
+  if (p.kind !== "correction") throw new Error("file_rule files corrections only, e.g. #31");
+  const action = cleanChoice(args.action, FILE_ACTIONS, "");
+  if (!action) throw new Error("action must be repeat, contradicts, new or none");
+  const touched = new Set();
+  const reply = withDb((db) =>
+    inTransaction(db, () => {
+      const entry = getEntry(db, "correction", p.id);
+      if (!entry) throw new Error("no correction #" + p.id);
+      if (entry.status !== "pending" || entry.filed_as) {
+        throw new Error("#" + p.id + " is already " + (entry.filed_as ? "filed (" + entry.filed_as + ")" : entry.status) + "; nothing to do");
+      }
+      if (ageHours(entry.created_at) > FILE_WINDOW_HOURS) {
+        throw new Error("#" + p.id + " was logged more than a day ago, so it is left for the user's review");
+      }
+      const stamp = now();
+      if (action === "none") {
+        db.prepare("UPDATE entries SET filed_as = 'none' WHERE id = ?").run(p.id);
+        return "Left #" + p.id + " for the user's review. Nothing else to do.";
+      }
+      const candidates = candidateRules(db, entry.task_type, null);
+      const listed = candidates.map((r) => "R" + r.id).join(", ") || "none";
+      let target = null;
+      if (action === "repeat" || action === "contradicts") {
+        if (!text(args.rule_id).trim()) throw new Error(action + " needs rule_id, one of: " + listed);
+        const rid = parseRuleId(args.rule_id);
+        target = candidates.find((r) => r.id === rid);
+        if (!target) throw new Error("R" + rid + " is not one of the rules in use for " + entry.task_type + " (" + listed + ")");
+      }
+      if (action === "repeat") {
+        if (String(target.created_at) > String(entry.created_at)) {
+          throw new Error("R" + target.id + " was made after this mistake, so it cannot have been repeated; choose new or none");
+        }
+        db.prepare("UPDATE entries SET status = 'filed', filed_as = 'repeat', repeat_of_rule_id = ? WHERE id = ?").run(target.id, p.id);
+        db.prepare(
+          "INSERT OR IGNORE INTO rule_sources (rule_id, entry_kind, entry_id, role, created_at) VALUES (?, 'correction', ?, 'repeat', ?)"
+        ).run(target.id, p.id, stamp);
+        return "Filed #" + p.id + " as a repeat after rule R" + target.id + ". Nothing else to do.";
+      }
+      const ruleText = draftedText(args.rule, candidates);
+      const taskType = text(args.task_type).trim().toLowerCase() === "any" ? "any"
+        : text(args.task_type).trim() ? cleanTaskType(args.task_type) : entry.task_type;
+      const failureType = cleanChoice(args.failure_type, FAILURE_NAMES, entry.failure_type || "other");
+      const ruleId = Number(
+        db.prepare(
+          "INSERT INTO rules (created_at, updated_at, text, task_type, failure_type, scope, status, origin, replaces_rule_id)" +
+            " VALUES (?, ?, ?, ?, ?, ?, 'provisional', 'auto', ?)"
+        ).run(stamp, stamp, ruleText, taskType, failureType, entry.scope, target ? target.id : null).lastInsertRowid
+      );
+      const source = db.prepare(
+        "INSERT OR IGNORE INTO rule_sources (rule_id, entry_kind, entry_id, role, created_at) VALUES (?, ?, ?, 'source', ?)"
+      );
+      source.run(ruleId, "correction", p.id, stamp);
+      db.prepare("UPDATE entries SET status = 'filed', filed_as = ? WHERE id = ?").run(action, p.id);
+      if (failureType === "helper_misfire") {
+        // A helper-briefing rule also files the pending subagent problems linked to this correction.
+        for (const l of db.prepare(
+          "SELECT s.id FROM entry_links l JOIN subagent_entries s ON s.id = l.subagent_id WHERE l.correction_id = ? AND s.status = 'pending'"
+        ).all(p.id)) {
+          source.run(ruleId, "subagent", l.id, stamp);
+          db.prepare("UPDATE subagent_entries SET status = 'filed', filed_as = 'new' WHERE id = ?").run(l.id);
+        }
+      }
+      touched.add(taskType);
+      if (target) {
+        db.prepare("UPDATE rules SET status = 'replaced', updated_at = ? WHERE id = ?").run(stamp, target.id);
+        touched.add(target.task_type);
+        return "Filed #" + p.id + ": provisional rule R" + ruleId + " for " + taskType + " replaces R" + target.id +
+          ", which it contradicts. Nothing else to do.";
+      }
+      return "Filed #" + p.id + ": provisional rule R" + ruleId + " for " + taskType + ". Nothing else to do.";
+    })
+  );
+  for (const t of touched) writeRulesFile(t);
+  return reply;
+}
+
+function updateRule(args) {
+  const rid = parseRuleId(args.rule_id);
+  const action = cleanChoice(args.action, RULE_ACTIONS, "");
+  if (!action) throw new Error("action must be keep, drop, reword or restore");
+  const touched = new Set();
+  const reply = withDb((db) =>
+    inTransaction(db, () => {
+      const r = db.prepare("SELECT * FROM rules WHERE id = ?").get(rid);
+      if (!r) throw new Error("no rule R" + rid);
+      const stamp = now();
+      const live = r.status === "active" || r.status === "provisional";
+      touched.add(r.task_type);
+      if (action === "keep") {
+        if (r.status === "active") return "R" + rid + " is already active.";
+        if (r.status !== "provisional") throw new Error("R" + rid + " is " + r.status + "; use restore to use it again");
+        db.prepare("UPDATE rules SET status = 'active', kept_at = ?, kept_how = 'user', updated_at = ? WHERE id = ?").run(stamp, stamp, rid);
+        return "Kept R" + rid + ". It is now active.";
+      }
+      if (action === "drop") {
+        if (!live) throw new Error("R" + rid + " is already " + r.status);
+        db.prepare("UPDATE rules SET status = 'dropped', dropped_at = ?, updated_at = ? WHERE id = ?").run(stamp, stamp, rid);
+        let back = "";
+        const old = r.replaces_rule_id ? db.prepare("SELECT * FROM rules WHERE id = ?").get(r.replaces_rule_id) : null;
+        if (old && old.status === "replaced") {
+          db.prepare("UPDATE rules SET status = ?, updated_at = ? WHERE id = ?").run(restoredStatus(old), stamp, old.id);
+          touched.add(old.task_type);
+          back = " R" + old.id + ", which it had replaced, is back in use.";
+        }
+        return "Dropped R" + rid + ". It is kept on file but no longer used." + back;
+      }
+      if (action === "reword") {
+        if (!live) throw new Error("R" + rid + " is " + r.status + "; restore it before rewording");
+        const ruleText = scrub(args.rule, MAX_RULE);
+        if (!ruleText) throw new Error("rule is required for reword: the new one-line text");
+        db.prepare("UPDATE rules SET text = ?, status = 'active', kept_how = CASE WHEN status = 'provisional' THEN 'user' ELSE kept_how END," +
+          " kept_at = COALESCE(kept_at, ?), updated_at = ? WHERE id = ?")
+          .run(ruleText, r.origin === "review" ? null : stamp, stamp, rid);
+        return "Reworded R" + rid + ": " + ruleText + " It is active.";
+      }
+      if (r.status !== "dropped") throw new Error("only dropped rules can be restored; R" + rid + " is " + r.status);
+      const status = restoredStatus(r);
+      db.prepare("UPDATE rules SET status = ?, dropped_at = NULL, updated_at = ? WHERE id = ?").run(status, stamp, rid);
+      let swap = "";
+      const old = r.replaces_rule_id ? db.prepare("SELECT * FROM rules WHERE id = ?").get(r.replaces_rule_id) : null;
+      if (old && (old.status === "active" || old.status === "provisional")) {
+        db.prepare("UPDATE rules SET status = 'replaced', updated_at = ? WHERE id = ?").run(stamp, old.id);
+        touched.add(old.task_type);
+        swap = " It replaces R" + old.id + " again.";
+      }
+      return "Restored R" + rid + " (" + status + ")." + swap;
+    })
+  );
+  for (const t of touched) writeRulesFile(t);
+  return reply;
+}
+
 // ---------- rules ----------
 
 function ruleSources(db) {
@@ -988,6 +1364,8 @@ function groupedRuleLines(rules, sources, indent) {
       const tags = [];
       if (title === "Other rules") tags.push(r.failure_type);
       tags.push(r.scope);
+      if (r.status === "provisional") tags.push("provisional");
+      if (r.replaces_rule_id) tags.push("replaces R" + r.replaces_rule_id);
       const from = sources.get(r.id);
       if (from) tags.push("from " + from.join(", "));
       lines.push(indent + "  R" + r.id + ". " + r.text + " (" + tags.join("; ") + ")");
@@ -1000,7 +1378,7 @@ function showRules(args) {
   const scope = text(args.scope).trim().toLowerCase();
   const taskFilter = text(args.task_type).trim() ? cleanTaskType(args.task_type) : "";
   return withDb((db) => {
-    const conds = ["status = 'active'"];
+    const conds = [LIVE];
     const params = [];
     if (SCOPES.includes(scope)) {
       conds.push("scope = ?");
@@ -1011,14 +1389,22 @@ function showRules(args) {
       params.push(taskFilter);
     }
     const rules = db.prepare("SELECT * FROM rules WHERE " + conds.join(" AND ") + " ORDER BY task_type, id").all(...params);
-    if (!rules.length) return "No Forge rules yet.";
+    const retired = db.prepare("SELECT status, COUNT(*) AS n FROM rules WHERE status IN ('dropped', 'replaced') GROUP BY status").all();
+    const retiredLine = retired.length
+      ? "Not in use: " + retired.map((x) => x.n + " " + x.status).join(", ") + "."
+      : "";
+    if (!rules.length) return "No Forge rules yet." + (retiredLine ? "\n\n" + retiredLine : "");
     const sources = ruleSources(db);
-    const lines = ["Forge rules: " + rules.length + " active."];
+    const provisional = rules.filter((r) => r.status === "provisional").length;
+    const lines = ["Forge rules: " + rules.length + " in use (" + (rules.length - provisional) + " active, " +
+      provisional + " provisional). Provisional rules were drafted by Claude from a correction; say keep, drop " +
+      "or reword with the rule number."];
     const types = Array.from(new Set(rules.map((r) => r.task_type)));
     for (const t of types) {
       lines.push("", t);
       lines.push(...groupedRuleLines(rules.filter((r) => r.task_type === t), sources, "  "));
     }
+    if (retiredLine) lines.push("", retiredLine);
     return lines.join("\n");
   });
 }
@@ -1027,12 +1413,13 @@ function writeRulesFile(taskType) {
   // Rewrites the readable copy for one task type. The database stays the master copy.
   try {
     const body = withDb((db) => {
-      const rules = db.prepare("SELECT * FROM rules WHERE status = 'active' AND task_type = ? ORDER BY id").all(taskType);
+      const rules = db.prepare("SELECT * FROM rules WHERE " + LIVE + " AND task_type = ? ORDER BY id").all(taskType);
       const lines = [
         "# Forge rules: " + taskType,
         "",
-        "Approved rules for " + (taskType === "any" ? "every task" : taskType + " tasks") + ". Written by Mati Forge; " +
-          "changes made in this file are overwritten.",
+        "Rules in use for " + (taskType === "any" ? "every task" : taskType + " tasks") + ". Provisional rules were " +
+          "drafted by Claude from a correction and can be kept or dropped. Written by Mati Forge; changes made in " +
+          "this file are overwritten.",
         "",
       ];
       const sources = ruleSources(db);
@@ -1041,7 +1428,7 @@ function writeRulesFile(taskType) {
         if (line.startsWith("  ")) lines.push("- " + line.trim());
         else lines.push("", "## " + line.slice(0, -1), "");
       }
-      if (!rules.length) lines.push("No active rules.");
+      if (!rules.length) lines.push("No rules in use.");
       return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim() + "\n";
     });
     fs.mkdirSync(rulesDir(), { recursive: true });
@@ -1055,18 +1442,43 @@ function writeRulesFile(taskType) {
 
 // ---------- briefing ----------
 
-function briefRules(db, taskType) {
-  // Up to 5 active rules: confirm-first, then helper briefing, then the rest.
-  // Within a group: rules for this task type before "any", then most-used, then newest.
+function relevance(rules, request) {
+  // Scores each rule by the words it shares with the request. A word counts
+  // more the fewer rules contain it (log(rules / rules containing it)), so a
+  // word every rule has, like "deck" for pitch decks, counts for nothing.
+  const scores = new Map(rules.map((r) => [r.id, 0]));
+  const asked = terms(request);
+  if (!asked.size || rules.length < 2) return scores;
+  const ruleTerms = new Map(rules.map((r) => [r.id, terms(r.text)]));
+  for (const t of asked) {
+    const holders = rules.filter((r) => ruleTerms.get(r.id).has(t));
+    if (!holders.length) continue;
+    const weight = Math.log(rules.length / holders.length);
+    for (const r of holders) scores.set(r.id, scores.get(r.id) + weight);
+  }
+  return scores;
+}
+
+function briefRules(db, taskType, request) {
+  // Up to 5 rules in use, picked in this order:
+  // 1. relevance to the request (only when a request is given),
+  // 2. confirm-first, then helper briefing, then the rest,
+  // 3. rules for this task type before "any",
+  // 4. active before provisional,
+  // 5. most-used, then newest.
   const rules = db.prepare(
     "SELECT r.*, (SELECT COUNT(*) FROM rule_sources s WHERE s.rule_id = r.id) AS uses" +
-      " FROM rules r WHERE r.status = 'active' AND r.task_type IN (?, 'any')"
+      " FROM rules r WHERE r." + LIVE + " AND r.task_type IN (?, 'any')"
   ).all(taskType);
+  const scores = relevance(rules, request);
   const group = (r) => (r.failure_type === "wrong_direction" ? 0 : r.failure_type === "helper_misfire" ? 1 : 2);
+  const rounded = (r) => Math.round(scores.get(r.id) * 1000);
   return rules
     .sort((a, b) =>
+      rounded(b) - rounded(a) ||
       group(a) - group(b) ||
       (a.task_type === "any") - (b.task_type === "any") ||
+      (a.status === "provisional") - (b.status === "provisional") ||
       Number(b.uses) - Number(a.uses) ||
       b.id - a.id
     )
@@ -1074,11 +1486,13 @@ function briefRules(db, taskType) {
 }
 
 function watchOuts(db, taskType) {
-  // Up to 2 recent pending failures for this task type that no rule covers yet.
+  // Up to 2 recent pending failures for this task type that no rule covers yet
+  // (one-off fixes Claude chose not to make a rule from are left out).
   const since = new Date(Date.now() - WATCH_OUT_DAYS * 24 * 3600 * 1000).toISOString().slice(0, 10);
   const items = [];
   for (const c of db.prepare(
-    "SELECT * FROM entries WHERE status = 'pending' AND task_type = ? AND created_at >= ? ORDER BY id DESC LIMIT 20"
+    "SELECT * FROM entries WHERE status = 'pending' AND (filed_as IS NULL OR filed_as != 'none')" +
+      " AND task_type = ? AND created_at >= ? ORDER BY id DESC LIMIT 20"
   ).all(taskType, since)) {
     items.push({ priority: c.failure_type === "wrong_direction" ? 0 : c.failure_type === "helper_misfire" ? 1 : 2,
       created: c.created_at, line: "Last time Claude " + lower(sentence(c.ai_did)) + " Correction: " + sentence(c.user_said) });
@@ -1102,12 +1516,17 @@ function lower(t) {
 function getBriefing(args) {
   const taskType = text(args.task_type).trim() ? cleanTaskType(args.task_type) : "";
   if (!taskType) throw new Error("task_type is required");
+  const request = scrub(args.request, MAX_REQUEST);
+  autoKeep();
   return withDb((db) => {
-    const rules = briefRules(db, taskType);
+    const rules = briefRules(db, taskType, request);
     const watch = watchOuts(db, taskType);
-    db.prepare("INSERT INTO briefings (created_at, task_ref, task_type, rule_ids) VALUES (?, ?, ?, ?)")
-      .run(now(), cleanTaskRef(args.task_ref), taskType, rules.map((r) => r.id).join(","));
-    if (!rules.length && !watch.length) return "No Forge rules or watch-outs for " + taskType + ". Carry on as usual.";
+    db.prepare("INSERT INTO briefings (created_at, task_ref, task_type, rule_ids, request) VALUES (?, ?, ?, ?, ?)")
+      .run(now(), cleanTaskRef(args.task_ref), taskType, rules.map((r) => r.id).join(","), request || null);
+    const offer = reportOffer(db) ? ["", OFFER_LINE] : [];
+    if (!rules.length && !watch.length) {
+      return ["No Forge rules or watch-outs for " + taskType + ". Carry on as usual."].concat(offer).join("\n");
+    }
     const lines = ["Forge briefing for " + taskType + ". Follow it without mentioning Forge."];
     const sections = [
       ["Before starting, confirm with the user (unless the request already answers it):", rules.filter((r) => r.failure_type === "wrong_direction")],
@@ -1123,8 +1542,259 @@ function getBriefing(args) {
       lines.push("", "Watch out (recent, no rule yet):");
       for (const w of watch) lines.push("- " + w);
     }
-    return lines.join("\n");
+    return lines.concat(offer).join("\n");
   });
+}
+
+// ---------- report ----------
+
+const OFFER_LINE =
+  'Weekly report: at the end of your first reply in this task, add this one line as written: ' +
+  'Your weekly Forge report is ready. Say "show my Forge report" to see it.';
+
+function getSetting(db, key) {
+  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(key);
+  return row ? row.value : null;
+}
+
+function setSetting(db, key, value) {
+  db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
+}
+
+function reportOffer(db) {
+  // At most once a week, and only when something was logged in the last week.
+  const last = [getSetting(db, "report_shown_at"), getSetting(db, "report_offered_at")].filter(Boolean).sort().pop();
+  if (last && ageHours(last) < OFFER_EVERY_DAYS * 24) return false;
+  const recent = db.prepare("SELECT COUNT(*) AS n FROM entries WHERE status != 'test' AND created_at >= ?").get(daysAgo(7)).n;
+  if (!Number(recent)) return false;
+  setSetting(db, "report_offered_at", now());
+  return true;
+}
+
+function autoKeep() {
+  // Provisional rules shown in a report at least 7 days ago, and not dropped or
+  // reworded since, become active: no answer means keep.
+  const types = withDb((db) =>
+    inTransaction(db, () => {
+      const due = db.prepare(
+        "SELECT id, task_type FROM rules WHERE status = 'provisional' AND first_reported_at IS NOT NULL AND first_reported_at <= ?"
+      ).all(daysAgo(KEEP_AFTER_DAYS));
+      const stamp = now();
+      for (const r of due) {
+        db.prepare("UPDATE rules SET status = 'active', kept_at = ?, kept_how = 'auto', updated_at = ? WHERE id = ?").run(stamp, stamp, r.id);
+      }
+      return new Set(due.map((r) => r.task_type));
+    })
+  );
+  for (const t of types) writeRulesFile(t);
+}
+
+function shortDate(stamp) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(stamp || "");
+  return m ? String(+m[3]) + " " + MONTHS[+m[2] - 1] : stamp;
+}
+
+function plus(stamp, days) {
+  return stampOf(new Date(Date.parse(stamp) + days * DAY_MS));
+}
+
+function per10(mistakes, tasks) {
+  return tasks ? (Math.round((100 * mistakes) / tasks) / 10).toFixed(1) : "-";
+}
+
+function countTasks(db, taskType, from, to) {
+  // Briefed tasks of a type in a window; one task can have more than one briefing.
+  const conds = ["created_at >= ?"];
+  const params = [from];
+  if (to) {
+    conds.push("created_at < ?");
+    params.push(to);
+  }
+  if (taskType !== "any") {
+    conds.push("task_type = ?");
+    params.push(taskType);
+  }
+  return Number(db.prepare(
+    "SELECT COUNT(DISTINCT COALESCE(task_ref, 'b' || id)) AS n FROM briefings WHERE " + conds.join(" AND ")
+  ).get(...params).n);
+}
+
+// A correction's failure type, or, for older notes that were reviewed before
+// failure types existed on notes, the failure type of the rule made from it.
+const FAILURE_OF_ENTRY =
+  "COALESCE(failure_type, (SELECT r.failure_type FROM rule_sources s JOIN rules r ON r.id = s.rule_id" +
+  " WHERE s.entry_kind = 'correction' AND s.entry_id = entries.id AND s.role = 'source' ORDER BY r.id LIMIT 1))";
+
+function countMistakes(db, taskType, failureType, from, to) {
+  // Corrections of the same task type and failure type in a window.
+  const conds = ["status != 'test'", FAILURE_OF_ENTRY + " = ?", "created_at >= ?"];
+  const params = [failureType, from];
+  if (to) {
+    conds.push("created_at < ?");
+    params.push(to);
+  }
+  if (taskType !== "any") {
+    conds.push("task_type = ?");
+    params.push(taskType);
+  }
+  return Number(db.prepare("SELECT COUNT(*) AS n FROM entries WHERE " + conds.join(" AND ")).get(...params).n);
+}
+
+function headline(db) {
+  // Repeat rate before and after rules, per kind of mistake (task type plus
+  // failure type) that has a rule in use. "Before" starts at the first briefing
+  // for that task type, because tasks are only counted from briefings.
+  const kinds = db.prepare(
+    "SELECT task_type, failure_type, MIN(created_at) AS since, GROUP_CONCAT(id) AS ids FROM rules WHERE " + LIVE +
+      " GROUP BY task_type, failure_type ORDER BY task_type, failure_type"
+  ).all();
+  const measured = [];
+  for (const k of kinds) {
+    const first = db.prepare(
+      "SELECT MIN(created_at) AS t FROM briefings" + (k.task_type === "any" ? "" : " WHERE task_type = ?")
+    ).get(...(k.task_type === "any" ? [] : [k.task_type])).t;
+    if (!first) continue;
+    const row = {
+      label: k.task_type + ", " + k.failure_type + " (" + String(k.ids).split(",").map((x) => "R" + x).join(", ") + ")",
+      tasksBefore: first < k.since ? countTasks(db, k.task_type, first, k.since) : 0,
+      tasksAfter: countTasks(db, k.task_type, k.since, null),
+      before: first < k.since ? countMistakes(db, k.task_type, k.failure_type, first, k.since) : 0,
+      after: countMistakes(db, k.task_type, k.failure_type, k.since, null),
+    };
+    if (row.tasksBefore >= MIN_TASKS && row.tasksAfter >= MIN_TASKS) measured.push(row);
+  }
+  const lines = ["Headline: the same kind of mistake (same task type and failure type), per 10 briefed tasks, before and after its first rule."];
+  if (!measured.length) {
+    lines.push("Not enough data yet. A kind of mistake is measured once its task type has at least " + MIN_TASKS +
+      " briefed tasks before its first rule and " + MIN_TASKS + " after. Kinds with a rule: " + kinds.length +
+      ". Rules made before briefings started can only be measured on the after side, so they are left out.");
+    return lines;
+  }
+  const sum = (f) => measured.reduce((a, r) => a + r[f], 0);
+  lines.push("Overall: " + per10(sum("before"), sum("tasksBefore")) + " before, " + per10(sum("after"), sum("tasksAfter")) +
+    " after (" + measured.length + (measured.length === 1 ? " kind" : " kinds") + " of mistake; " + sum("tasksBefore") + " tasks before, " + sum("tasksAfter") + " after).");
+  for (const r of measured.slice(0, 5)) {
+    lines.push("- " + r.label + ": " + r.before + " in " + r.tasksBefore + " tasks before, " + r.after + " in " + r.tasksAfter + " tasks after.");
+  }
+  return lines;
+}
+
+function getReport(args) {
+  const period = cleanChoice(args.period, Object.keys(PERIODS), "week");
+  const days = PERIODS[period];
+  autoKeep();
+  return withDb((db) =>
+    inTransaction(db, () => {
+      const stamp = now();
+      const start = daysAgo(days);
+      const prevStart = daysAgo(2 * days);
+      const lines = ["Forge report: last " + days + " days (" + shortDate(start) + " to " + shortDate(stamp) + ")", ""];
+      lines.push(...headline(db));
+
+      // Mistakes by failure type, against the previous period.
+      const counts = (from, to) => {
+        const map = new Map();
+        for (const r of db.prepare(
+          "SELECT COALESCE(" + FAILURE_OF_ENTRY + ", 'not set') AS f, COUNT(*) AS n FROM entries" +
+            " WHERE status != 'test' AND created_at >= ? AND created_at < ? GROUP BY 1"
+        ).all(from, to)) map.set(r.f, Number(r.n));
+        const subs = Number(db.prepare(
+          "SELECT COUNT(*) AS n FROM subagent_entries WHERE status != 'test' AND created_at >= ? AND created_at < ?"
+        ).get(from, to).n);
+        if (subs) map.set("helper_misfire", (map.get("helper_misfire") || 0) + subs);
+        return map;
+      };
+      const nowCounts = counts(start, plus(stamp, 1));
+      const prevCounts = counts(prevStart, start);
+      lines.push("", "Mistakes by type (corrections and helper problems):");
+      if (!nowCounts.size) lines.push("None in this period.");
+      for (const [f, n] of Array.from(nowCounts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 5)) {
+        lines.push("- " + f + ": " + n + " (previous " + days + " days: " + (prevCounts.get(f) || 0) + ")");
+      }
+      const byTask = db.prepare(
+        "SELECT task_type, COUNT(*) AS n FROM entries WHERE status != 'test' AND created_at >= ? GROUP BY task_type ORDER BY n DESC, task_type LIMIT 3"
+      ).all(start);
+      if (byTask.length) lines.push("Most corrected tasks: " + byTask.map((t) => t.task_type + " " + t.n).join(", ") + ".");
+
+      // Repeats after a rule in this period.
+      lines.push("", "Repeats after a rule:");
+      const repeats = db.prepare(
+        "SELECT * FROM entries WHERE status != 'test' AND repeat_of_rule_id IS NOT NULL AND created_at >= ? ORDER BY repeat_of_rule_id, id"
+      ).all(start);
+      if (!repeats.length) lines.push("None in this period.");
+      const byRule = new Map();
+      for (const e of repeats) {
+        if (!byRule.has(e.repeat_of_rule_id)) byRule.set(e.repeat_of_rule_id, []);
+        byRule.get(e.repeat_of_rule_id).push(e);
+      }
+      for (const [rid, list] of byRule) {
+        const rule = db.prepare("SELECT * FROM rules WHERE id = ?").get(rid);
+        const briefed = list.filter((e) => repeatContext(db, e, rid) === "it was in this task's briefing").length;
+        lines.push("- R" + rid + " (" + rule.task_type + "): " + list.length + (list.length === 1 ? " repeat" : " repeats") +
+          ", " + briefed + " while the rule was in the briefing. Rule: " + rule.text);
+      }
+
+      // Provisional rules waiting: keep or drop, no answer means keep.
+      lines.push("", "New rules Claude drafted (no answer means keep):");
+      const waiting = db.prepare("SELECT * FROM rules WHERE status = 'provisional' ORDER BY id").all();
+      if (!waiting.length) lines.push("None waiting.");
+      for (const r of waiting) {
+        const keepOn = plus(r.first_reported_at || stamp, KEEP_AFTER_DAYS);
+        lines.push("- R" + r.id + " (" + r.task_type + (r.replaces_rule_id ? ", replaces R" + r.replaces_rule_id : "") + "): " +
+          r.text + " Kept on " + shortDate(keepOn) + " unless you drop or reword it.");
+      }
+      if (waiting.length) lines.push('To change one, say for example "drop R' + waiting[0].id + '" or "reword R' + waiting[0].id + '".');
+      db.prepare("UPDATE rules SET first_reported_at = ? WHERE status = 'provisional' AND first_reported_at IS NULL").run(stamp);
+
+      // Conflicts: rules replaced by a newer correction in this period.
+      lines.push("", "Conflicts (the newer correction won):");
+      const swaps = db.prepare(
+        "SELECT n.id, n.text, n.status, o.id AS old_id, o.text AS old_text, o.status AS old_status FROM rules n" +
+          " JOIN rules o ON o.id = n.replaces_rule_id WHERE n.created_at >= ? ORDER BY n.id"
+      ).all(start);
+      if (!swaps.length) lines.push("None in this period.");
+      for (const c of swaps) {
+        const now_ = c.status === "dropped" ? " You dropped R" + c.id + ", so R" + c.old_id + " is back."
+          : ' Say "drop R' + c.id + '" to go back to R' + c.old_id + ".";
+        lines.push("- R" + c.id + " replaced R" + c.old_id + ". Old: " + c.old_text + " New: " + c.text + now_);
+      }
+
+      // Rules that keep repeating: candidates for rewording.
+      lines.push("", "Rules that keep repeating (consider rewording):");
+      const month = daysAgo(30);
+      const flagged = [];
+      for (const r of db.prepare("SELECT * FROM rules WHERE " + LIVE + " ORDER BY id").all()) {
+        const list = db.prepare(
+          "SELECT * FROM entries WHERE status != 'test' AND repeat_of_rule_id = ? AND created_at >= ?"
+        ).all(r.id, month);
+        const briefed = list.filter((e) => e.created_at >= start && repeatContext(db, e, r.id) === "it was in this task's briefing").length;
+        if (list.length >= REPEATING || briefed) {
+          flagged.push("- R" + r.id + " (" + r.task_type + "): repeated " + list.length + (list.length === 1 ? " time" : " times") +
+            " in 30 days, " + briefed + " while in the briefing this period. Rule: " + r.text + ' Say "reword R' + r.id + '" to change it.');
+        }
+      }
+      lines.push(...(flagged.length ? flagged : ["None."]));
+
+      // How Forge itself is doing.
+      lines.push("", "How Forge is doing:");
+      const logged = db.prepare(
+        "SELECT COALESCE(filed_as, CASE WHEN status = 'pending' THEN 'not filed' ELSE 'reviewed' END) AS how, COUNT(*) AS n" +
+          " FROM entries WHERE status != 'test' AND created_at >= ? GROUP BY 1 ORDER BY 1"
+      ).all(start);
+      const total = logged.reduce((a, r) => a + Number(r.n), 0);
+      lines.push("- Corrections logged: " + total + (total ? " (" + logged.map((r) => r.how + " " + r.n).join(", ") + ")" : "") + ".");
+      lines.push("- Tasks briefed: " + countTasks(db, "any", start, null) + ".");
+      const auto = db.prepare(
+        "SELECT COUNT(*) AS n, SUM(CASE WHEN status = 'dropped' THEN 1 ELSE 0 END) AS dropped FROM rules WHERE origin = 'auto'"
+      ).get();
+      const made = Number(auto.n);
+      const dropped = Number(auto.dropped || 0);
+      lines.push("- Rules Claude drafted so far: " + made + (made ? ", " + dropped + " dropped by you (" + Math.round((100 * dropped) / made) + "%)" : "") + ".");
+
+      setSetting(db, "report_shown_at", stamp);
+      return lines.join("\n");
+    })
+  );
 }
 
 const HANDLERS = {
@@ -1134,9 +1804,12 @@ const HANDLERS = {
   show_notes: showNotes,
   review_next: reviewNext,
   approve_rule: approveRule,
+  file_rule: fileRule,
+  update_rule: updateRule,
   reject_entry: rejectEntry,
   show_rules: showRules,
   get_briefing: getBriefing,
+  get_report: getReport,
 };
 
 // ---------- MCP plumbing ----------
